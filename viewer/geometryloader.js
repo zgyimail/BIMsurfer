@@ -7,7 +7,7 @@ import {DataInputStream} from "./datainputstream.js";
 
 import {AvlTree} from "./collections/avltree.js";
 
-const PROTOCOL_VERSION = 21;
+const PROTOCOL_VERSIONS = new Set([20, 21]);
 
 /**
  * This class is supposed to be and stay BIMserver-free.
@@ -310,6 +310,7 @@ export class GeometryLoader {
 						globalizedAabb = aabb;
 					}
 					const viewobj = this.renderLayer.viewer.getViewObject(oid);
+					viewobj.renderLayer = this.renderLayer;
 					viewobj.aabb = aabb;
 					viewobj.globalizedAabb = globalizedAabb;
 					this.renderLayer.viewer.setModelBounds(aabb);
@@ -444,12 +445,16 @@ export class GeometryLoader {
 			var type = stream.readUTF8();
 			stream.align8();
 			var roid = stream.readLong();
-			var croid = stream.readLong();
+			var uniqueModelId = this.readAndCreateUniqueModelId(stream);
 			let hasTransparencyValue = stream.readLong();
 			var hasTransparency = hasTransparencyValue == 1;
-			var hasTwoSidedTriangles = stream.readLong() == 1;
+			if (this.protocolVersion == 21) {
+				var hasTwoSidedTriangles = stream.readLong() == 1;
+			} else {
+				var hasTwoSidedTriangles = true;
+			}
 			var geometryDataId = stream.readLong();
-			this.readGeometry(stream, roid, croid, geometryDataId, geometryDataId, hasTransparency, hasTwoSidedTriangles, reused, type, true);
+			this.readGeometry(stream, roid, uniqueModelId, geometryDataId, geometryDataId, hasTransparency, hasTwoSidedTriangles, reused, type, true);
 			if (this.dataToInfo.has(geometryDataId)) {
 				// There are objects that have already been loaded, that are waiting for this GeometryData
 				var oids = this.dataToInfo.get(geometryDataId);
@@ -579,8 +584,12 @@ export class GeometryLoader {
 			return uniqueId;
 		}
 	}
+	
+	readAndCreateUniqueModelId(stream) {
+		return stream.readLong(); // On BIMserver, this is croid
+	}
 
-	readGeometry(stream, roid, croid, geometryId, geometryDataOid, hasTransparency, hasTwoSidedTriangles, reused, type, useIntForIndices) {
+	readGeometry(stream, roid, uniqueModelId, geometryId, geometryDataOid, hasTransparency, hasTwoSidedTriangles, reused, type, useIntForIndices) {
 		var numIndices = stream.readInt();
 		if (useIntForIndices) {
 			var indices = stream.readIntArray(numIndices);
@@ -653,7 +662,7 @@ export class GeometryLoader {
 		if (colors.length == 0) {
 			debugger;
 		}
-		this.renderLayer.createGeometry(this.loaderId, roid, croid, geometryDataOid, positions, normals, colors, color, indices, lineIndices, hasTransparency, hasTwoSidedTriangles, reused);
+		this.renderLayer.createGeometry(this.loaderId, roid, uniqueModelId, geometryDataOid, positions, normals, colors, color, indices, lineIndices, hasTransparency, hasTwoSidedTriangles, reused);
 	}
 
 	readColors(stream, type) {
@@ -725,8 +734,8 @@ export class GeometryLoader {
 
 		this.protocolVersion = data.readByte();
 
-		if (this.protocolVersion != PROTOCOL_VERSION) {
-			console.error("Unimplemented version (protocol: " + this.protocolVersion + ", implemented: " + PROTOCOL_VERSION + ").\nUsually this means you need to either:\n\t- Update the BinarySerializers plugin bundle in BIMserver\n\t- Update your version of BIMsurfer 3");
+		if (!PROTOCOL_VERSIONS.has(this.protocolVersion)) {
+			console.error("Unimplemented version (protocol: " + this.protocolVersion + ", implemented: " + PROTOCOL_VERSIONS + ").\nUsually this means you need to either:\n\t- Update the BinarySerializers plugin bundle in BIMserver\n\t- Update your version of BIMsurfer 3");
 			return false;
 		}
 

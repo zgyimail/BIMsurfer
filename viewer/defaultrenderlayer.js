@@ -29,8 +29,8 @@ export class DefaultRenderLayer extends RenderLayer {
 		window.defaultRenderLayer = this;
 	}
 
-	createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb) {
-		return super.createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb, this.gpuBufferManager);
+	createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb, quantFromAabb) {
+		return super.createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb, this.gpuBufferManager, null, quantFromAabb);
 	}
 
 	addGeometryReusable(geometry, loader, gpuBufferManager) {
@@ -38,7 +38,7 @@ export class DefaultRenderLayer extends RenderLayer {
 		this.viewer.stats.inc("Drawing", "Draw calls per frame (L1)");
 	}
 	
-	addGeometry(loaderId, geometry, object) {
+	addGeometry(loaderId, geometry, object, quantFromAabb) {
 		// TODO some of this is duplicate code, also in tilingrenderlayer.js
 		if (geometry.reused > 1 && this.geometryDataToReuse != null && this.geometryDataToReuse.has(geometry.id)) {
 			geometry.matrices.push(object.matrix);
@@ -53,13 +53,13 @@ export class DefaultRenderLayer extends RenderLayer {
 			vertices: geometry.positions.length,
 			normals: geometry.normals.length,
 			indices: geometry.indices.length,
-			lineIndices: geometry.lineIndices.length,
+			lineIndices: geometry.lineIndices ? geometry.lineIndices.length : 0,
 			colors: (geometry.colors != null ? geometry.colors.length : 0),
 			pickColors: geometry.positions.length
 		};
 		var buffer = this.bufferManager.getBufferSet(geometry.hasTransparency, geometry.color, sizes);
 
-		super.addGeometry(loaderId, geometry, object, buffer, sizes);
+		super.addGeometry(loaderId, geometry, object, buffer, sizes, quantFromAabb);
 	}
 
 	done(loaderId) {
@@ -143,7 +143,7 @@ export class DefaultRenderLayer extends RenderLayer {
 			this.gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, this.viewer.camera.projMatrix);
 			this.gl.uniformMatrix4fv(programInfo.uniformLocations.viewMatrix, false, this.viewer.camera.viewMatrix);
 			this.gl.uniform3fv(programInfo.uniformLocations.postProcessingTranslation, this.postProcessingTranslation);
-			this.gl.uniform4fv(programInfo.uniformLocations.sectionPlane, this.viewer.sectionPlaneValues);
+			this.gl.uniform4fv(programInfo.uniformLocations.sectionPlane, this.viewer.sectionPlanes.buffer);
 
 			this.renderFinalBuffers(buffers, programInfo, visibleElements, lines);
 		}

@@ -12,6 +12,8 @@ import {Stats} from "./stats.js";
 import {DefaultSettings} from "./defaultsettings.js";
 import {Utils} from "./utils.js";
 import {DataInputStream} from "./datainputstream.js";
+import { GLTFLoader } from "./gltfloader.js"
+
 
 export class AbstractViewer {
 	constructor(settings, canvas, width, height, stats) {
@@ -48,22 +50,42 @@ export class AbstractViewer {
         if ("OffscreenCanvas" in window && canvas instanceof OffscreenCanvas) {
 			
 		} else {
-			if (this.settings.autoResize) {
-				this.autoResizeCanvas();
-				this.resizeHandler = () => {
-					this.autoResizeCanvas();
-				};
-				window.addEventListener("resize", this.resizeHandler, false);
+			if (this.settings.resizing == "manual") {
+				// Do nothing, let the embedder deal with resizing
 			} else {
-				this.canvas.width = this.width;
-				this.canvas.height = this.height;
-				this.resizeHandler = () => {
+				if (this.settings.autoResize) {
 					this.autoResizeCanvas();
-				};
-				window.addEventListener("resize", this.resizeHandler, false);
+					this.resizeHandler = () => {
+						this.autoResizeCanvas();
+					};
+					window.addEventListener("resize", this.resizeHandler, false);
+				} else {
+					this.canvas.width = this.width;
+					this.canvas.height = this.height;
+					this.resizeHandler = () => {
+						this.autoResizeCanvas();
+					};
+					window.addEventListener("resize", this.resizeHandler, false);
+				}
+				this.viewer.setDimensions(this.width, this.height);
 			}
 		}
-		this.viewer.setDimensions(this.width, this.height);
+	}
+
+	loadGltf(params) {
+		let load = (buffer) => {
+			var gltfLoader = new GLTFLoader(this.viewer, buffer, params);
+			gltfLoader.processGLTFBuffer();
+		};
+		if (params.url) {
+			fetch(params.url).then(function (response) {
+				return response.arrayBuffer();
+			}).then(load);
+		} else if (params.buffer) {
+			load(params.buffer);
+		} else {
+			throw new Error("Expected buffer or url");
+		}
 	}
 
 	loadAnnotationsFromPreparedBufferUrl(url) {
@@ -314,6 +336,9 @@ export class AbstractViewer {
 	
 	cleanup() {
 		window.removeEventListener("resize", this.resizeHandler, false);
+		if (this.stats) {
+			this.stats.cleanup();
+		}
 		this.viewer.cleanup();
 	}
 	

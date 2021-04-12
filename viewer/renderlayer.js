@@ -20,7 +20,6 @@ let WEBGL_multi_draw = null;
  * to a render layer, ie. the base geometries always visible vs. the
  * dynamically visible tiles based on camera orientation.
  * 
- * @export
  * @class RenderLayer
  */
 export class RenderLayer {
@@ -32,7 +31,7 @@ export class RenderLayer {
 		WEBGL_multi_draw = this.gl.getExtension("WEBGL_multi_draw");
 		this.geometryDataToReuse = geometryDataToReuse;
 		this.geometryCache = new GeometryCache(this);
-		this.instanceSelectionData = new Uint32Array(1024);
+		this.instanceSelectionData = new Uint32Array(256);
 		this.previousInstanceVisibilityState = null;
 
 		this.selectionOutlineMatrix = mat4.create();
@@ -48,15 +47,12 @@ export class RenderLayer {
 		this.postProcessingTranslation = vec3.fromValues(0, 0, 0);
 	}
 
-	createGeometry(loaderId, roid, croid, geometryId, positions, normals, colors, color, indices, lineIndices, hasTransparency, hasTwoSidedTriangles, reused) {
-		if (lineIndices == null) {
-			debugger;
-		}
+	createGeometry(loaderId, roid, uniqueModelId, geometryId, positions, normals, colors, color, indices, lineIndices, hasTransparency, hasTwoSidedTriangles, reused) {
 		var bytesUsed = Utils.calculateBytesUsed(this.settings, positions.length, colors.length, indices.length, lineIndices ? lineIndices.length : 0, normals.length);
 		var geometry = {
 				id: geometryId,
 				roid: roid,
-				croid: croid,
+				uniqueModelId: uniqueModelId,
 				positions: positions,
 				normals: normals,
 				colors: colors,
@@ -85,7 +81,7 @@ export class RenderLayer {
 		return geometry;
 	}
 	
-	createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb, gpuBufferManager, node) {
+	createObject(loaderId, roid, uniqueId, geometryIds, matrix, normalMatrix, scaleMatrix, hasTransparency, type, aabb, gpuBufferManager, node, quantFromAabb) {
 		var loader = this.getLoader(loaderId);
 		var object = {
 			uniqueId: uniqueId,
@@ -108,6 +104,7 @@ export class RenderLayer {
 		var globalizedAabb = Utils.transformBounds(aabb, this.viewer.globalTranslationVector);
 		
 		var viewObject = {
+			renderLayer: this,
             type: type,
 			aabb: aabb,
 			globalizedAabb: globalizedAabb,
@@ -121,7 +118,7 @@ export class RenderLayer {
 		this.viewer.addViewObject(uniqueId, viewObject);
 
 		geometryIds.forEach((id) => {
-			this.addGeometryToObject(id, object.uniqueId, loader, gpuBufferManager);
+			this.addGeometryToObject(id, object.uniqueId, loader, gpuBufferManager, quantFromAabb);
 		});
 
 		this.viewer.stats.inc("Models", "Objects");
@@ -129,14 +126,39 @@ export class RenderLayer {
 		return object;
 	}
 
-	addGeometry(loaderId, geometry, object, buffer, sizes) {
+	addGeometry(loaderId, geometry, object, buffer, sizes, quantFromAabb) {
 		var loaderQuantizeNormals = this.settings.loaderSettings.quantizeNormals;
 		var quantizeNormals = this.settings.quantizeNormals;
 
 		var startIndex = buffer.positionsIndex / 3;
 
+		let QM = this.viewer.vertexQuantization.vertexQuantizationMatrix;
+		let IQM = this.viewer.vertexQuantization.inverseVertexQuantizationMatrixWithGlobalTranslation;
+
+		if (quantFromAabb) {
+			// @todo not really from AABB (because we want to limit the amount of quantization matrices),
+			// but maybe come up with something more robust than this.
+			let QM2 = mat4.create();
+			QM2[ 0] = 0.01;
+			QM2[ 5] = 0.01;
+			QM2[10] = 0.01;
+			QM2[12] = 0.01 * QM[12] / QM[0];
+			QM2[13] = 0.01 * QM[13] / QM[5];
+			QM2[14] = 0.01 * QM[14] / QM[10];
+			QM2[15] = 1.0;
+			QM = QM2;
+
+			IQM = mat4.identity(mat4.create());
+			IQM[0] *= 100.;
+			IQM[5] *= 100.;
+			IQM[10] *= 100.;
+		}
+
+		buffer.unquantizationMatrix = IQM;
+
 		try {
 			var vertex = vec3.create();
+			let outOfBounds = new Set();
 			for (var i=0; i<geometry.positions.length; i+=3) {
 				// When quantizeVertices is on and we use the buffers in a combined buffer (which is what this method, addGeometry does),
 				// we need to un-quantize the vertices, transform them, then quantize them again (so the shaders can again unquantize them).
@@ -151,11 +173,17 @@ export class RenderLayer {
 				// In that case we won't have to unquantize + quantize again
 				
 				if (this.settings.loaderSettings.quantizeVertices) {
-					vec3.transformMat4(vertex, vertex, this.viewer.vertexQuantization.getUntransformedInverseVertexQuantizationMatrixForCroid(geometry.croid));
+					vec3.transformMat4(vertex, vertex, this.viewer.vertexQuantization.getUntransformedInverseVertexQuantizationMatrixForUniqueModelId(geometry.uniqueModelId));
 				}
-				vec3.transformMat4(vertex, vertex, object.matrix);
+				vec3.transformMat4(vertex, vertex, object.matrix);				
+				vec3.scale(vertex, vertex, 1000);
+
 				if (this.settings.quantizeVertices) {
-					vec3.transformMat4(vertex, vertex, this.viewer.vertexQuantization.vertexQuantizationMatrixWithGlobalTranslation);
+					vec3.transformMat4(vertex, vertex, QM);
+					// Detect vertices going out of bounds of the quantization window.
+					if (Math.abs(vertex[0]) > 16000 || Math.abs(vertex[1]) > 16000 || Math.abs(vertex[1]) > 16000) {
+						outOfBounds.add(i / 3);
+					}
 				}
 				
 				buffer.positions.set(vertex, buffer.positionsIndex);
@@ -236,7 +264,7 @@ export class RenderLayer {
 				start: buffer.indicesIndex, 
 				length: geometry.indices.length,
 				lineIndexStart: buffer.lineIndicesIndex,
-				lineIndexLength: geometry.lineIndices.length,
+				lineIndexLength: geometry.lineIndices ? geometry.lineIndices.length : 0,
 				color: originalColorIndex,
 				colorLength: geometry.colors.length
 			};
@@ -246,6 +274,19 @@ export class RenderLayer {
 			
 			var index = Array(3);
 			for (var i=0; i<geometry.indices.length; i+=3) {
+				let anyOutOfBounds = false;
+				for (let j = 0; j < 3; ++j) {
+					if (outOfBounds.has(geometry.indices[i + j])) {
+						anyOutOfBounds = true;
+						break;
+					}
+				}
+				if (anyOutOfBounds) {
+					buffer.indices.set([0,0,0], buffer.indicesIndex);
+					buffer.indicesIndex += 3;
+					continue;
+				}				
+
 				index[0] = geometry.indices[i + 0] + startIndex;
 				index[1] = geometry.indices[i + 1] + startIndex;
 				index[2] = geometry.indices[i + 2] + startIndex;
@@ -262,7 +303,7 @@ export class RenderLayer {
 				buffer.indices.set(index, buffer.indicesIndex);
 				buffer.indicesIndex += 3;
 			}
-			for (var i=0; i<geometry.lineIndices.length; i+=3) {
+			for (var i=0; i<(geometry.lineIndices ? geometry.lineIndices.length : 0); i+=3) {
 				index[0] = geometry.lineIndices[i + 0] + startIndex;
 				index[1] = geometry.lineIndices[i + 1] + startIndex;
 				index[2] = geometry.lineIndices[i + 2] + startIndex;
@@ -316,7 +357,7 @@ export class RenderLayer {
 		}
 	}
 	
-	addGeometryToObject(geometryId, uniqueId, loader, gpuBufferManager) {
+	addGeometryToObject(geometryId, uniqueId, loader, gpuBufferManager, quantFromAabb) {
 		var geometry = loader.geometries.get(geometryId);
 		if (geometry == null) {
 			if (this.geometryCache.has(geometryId)) {
@@ -327,27 +368,31 @@ export class RenderLayer {
 			}
 		}
 		var object = loader.objects.get(uniqueId);
-		this.addGeometry(loader.loaderId, geometry, object);
+		this.addGeometry(loader.loaderId, geometry, object, quantFromAabb);
 		object.geometry.push(geometryId);
 		if (geometry.isReused) {
 			geometry.reuseMaterialized++;
 			if (geometry.reuseMaterialized == geometry.reused) {
 				this.addGeometryReusable(geometry, loader, gpuBufferManager);
+				loader.geometries.delete(geometry.id);
+			} else if (geometry.reuseMaterialized % 256 == 0) {
+				// TODO this 256 is now equal to the number in the vertex shader, at some point this should become dynamic, based on hardware capabilities
+				console.log("Flushing 256");
+				this.addGeometryReusable(geometry, loader, gpuBufferManager);
+				geometry.objects = [];
+				geometry.matrices = [];
 			}
 		}
 	}
 	
 	addGeometryReusable(geometry, loader, gpuBufferManager) {
-		if (geometry.lineIndices == null) {
-			debugger;
-		}
 		var programInfo = this.viewer.programManager.getProgram(this.viewer.programManager.createKey(true, false));
 		var lineProgramInfo = this.viewer.programManager.getProgram(this.viewer.programManager.createKey(true, false, true));
         var pickProgramInfo = this.viewer.programManager.getProgram(this.viewer.programManager.createKey(true, true));
 
 		const numInstances = geometry.objects.length;
 
-		const positionBuffer = Utils.createBuffer(this.gl, this.bufferTransformer.convertVertices(geometry.croid, geometry.positions));
+		const positionBuffer = Utils.createBuffer(this.gl, this.bufferTransformer.convertVertices(geometry.uniqueModelId, geometry.positions));
 		const normalBuffer = Utils.createBuffer(this.gl, this.bufferTransformer.convertNormals(geometry.normals), null, this.gl.ARRAY_BUFFER, this.settings.loaderSettings.octEncodeNormals ? 2 : 3);
 		const colorBuffer = geometry.colors != null
 			? Utils.createBuffer(this.gl, geometry.colors, null, this.gl.ARRAY_BUFFER, 4)
@@ -393,7 +438,7 @@ export class RenderLayer {
 			gpuBufferManager,
 
 			geometry.roid,
-			geometry.croid
+			geometry.uniqueModelId
 		);
 
 		buffer.numInstances = numInstances;
@@ -410,7 +455,6 @@ export class RenderLayer {
 			this.viewer.uniqueIdToBufferSet.set(obj.uniqueId, [buffer]);
 		});
 
-		loader.geometries.delete(geometry.id);
 		gpuBufferManager.pushBuffer(buffer);
 
 		this.nrTrianglesLoaded += buffer.nrTrianglesToDraw;
@@ -460,8 +504,8 @@ export class RenderLayer {
 	 * Prepare the rendering pass, this is called only once for each frame
 	 */	
 	prepareRender() {
-		// this.lastCroidRendered is used to keep track of which croid was rendered previously, so we can skip some GPU calls, need to reset it though for each new frame
-		this.lastCroidRendered = null;
+		// this.lastUniqueModelIdRendered is used to keep track of which uniqueModelId was rendered previously, so we can skip some GPU calls, need to reset it though for each new frame
+		this.lastUniqueModelIdRendered = null;
 	}
 	
 	render(transparency, lineRender, twoSidedTriangles, visibleElements) {
@@ -503,16 +547,16 @@ export class RenderLayer {
 		gl.bindVertexArray(picking ? buffer.vaoPick : (lines ? buffer.lineRenderVao : buffer.vao));
 		if (buffer.reuse) {
 			if (this.viewer.settings.quantizeVertices) {
-				if (buffer.croid) {
-					if (this.lastCroidRendered === buffer.croid && false) {
+				if (buffer.uniqueModelId) {
+					if (this.lastUniqueModelIdRendered === buffer.uniqueModelId && false) {
 						// Skip it, this needs clarification, disabling for now because that seems to fix picking for instanced rendering
 					} else {
-						let uqm = this.viewer.vertexQuantization.getUntransformedInverseVertexQuantizationMatrixForCroid(buffer.croid);
+						let uqm = this.viewer.vertexQuantization.getUntransformedInverseVertexQuantizationMatrixForUniqueModelId(buffer.uniqueModelId);
 						gl.uniformMatrix4fv(programInfo.uniformLocations.vertexQuantizationMatrix, false, uqm);
-						this.lastCroidRendered = buffer.croid;
+						this.lastUniqueModelIdRendered = buffer.uniqueModelId;
 					}
 				} else {
-					console.log("no croid");
+					console.log("No uniqueModelId");
 				}
 			}
 			
@@ -543,7 +587,9 @@ export class RenderLayer {
 						this.previousInstanceVisibilityState = instanceVisibilityState;
 //					}
 					if (lines) {
-						gl.drawElementsInstanced(this.gl.LINES, buffer.lineIndexBuffer.N, buffer.indexType, 0, buffer.nrProcessedMatrices);
+						if (buffer.lineIndexBuffer) {
+							gl.drawElementsInstanced(this.gl.LINES, buffer.lineIndexBuffer.N, buffer.indexType, 0, buffer.nrProcessedMatrices);
+						}
 					} else {
 						gl.drawElementsInstanced(this.gl.TRIANGLES, buffer.indexBuffer.N, buffer.indexType, 0, buffer.nrProcessedMatrices);
 					}
@@ -750,6 +796,7 @@ export class RenderLayer {
 				gpuBufferManager
 			);
 			
+			newBuffer.unquantizationMatrix = buffer.unquantizationMatrix;
 			newBuffer.nrTrianglesToDraw = buffer.nrIndices / 3;
 			newBuffer.nrLinesToDraw = buffer.nrLineIndices / 2;
 			
@@ -809,7 +856,7 @@ export class RenderLayer {
 			// TODO check for reuse setting
 			for (let reuse of false_true) {
 				for (let twoSidedTriangles of false_true) {
-					var buffers = (node || this).gpuBufferManager.getBuffers(transparency, twoSidedTriangles, false, reuse);
+					var buffers = (node || this).gpuBufferManager.getBuffers(transparency, twoSidedTriangles, reuse);
 					var lastLineRenderer = null;
 					for (let buffer of buffers) {
 						// TODO iterate over union of buffer.uniqueIds and ids
